@@ -44,4 +44,33 @@ SELECT w.workshop_id AS workshop_id,
                                       WHERE wm.workshop_id = w.workshop_id
                                         AND NOT is_input)
            )         AS related_entities
-FROM Workshops AS w
+FROM Workshops AS w;
+
+
+--запрос, который возвращает информацию о военном отряде,
+--включая идентификаторы всех членов отряда, используемого снаряжения,
+--прошлых и текущих операций, тренировок
+
+SELECT ms.squad_id       AS squad_id,
+       ms.name           AS name,
+       ms.formation_type AS formation_type,
+       ms.leader_id      AS leader_id,
+       json_object(
+               'member_ids', (SELECT json_arrayagg(sm.dwarf_id)
+                              FROM squad_members AS sm
+                              WHERE sm.squad_id = ms.squad_id),
+               'equipment_ids', (SELECT json_arrayagg(se.equipment_id)
+                                 FROM squad_equipments AS se
+                                 WHERE se.squad_id = ms.squad_id),
+               'operation_ids', (SELECT json_arrayagg(so.operation_id)
+                                 FROM squad_operations AS so
+                                 WHERE so.squad_id = ms.squad_id
+                                   AND so.start_date <= CURRENT_DATE),
+               'training_schedule_ids', (SELECT json_arrayagg(st.schedule_id)
+                                         FROM squad_training AS st
+                                         WHERE st.squad_id = ms.squad_id),
+               'battle_report_ids', (SELECT json_arrayagg(sb.report_id)
+                                     FROM squad_battles AS sb
+                                     WHERE sb.squad_id = ms.squad_id)
+           )             AS related_entities
+FROM military_squads AS ms;
