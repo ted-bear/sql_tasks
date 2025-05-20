@@ -230,6 +230,7 @@ SELECT w.workshop_id,
        ROUND(COALESCE(ms.material_quantity::numeric
                           / NULLIF(ps.quantity_sum_per_workshop, 0), 0), 2) AS material_conversion_ratio,
        ROUND(COALESCE(cds.avg_level, 0), 2)                                 AS average_craftsdwarf_skill,
+       ROUND(cds.avg_level, w.quality) AS skill_quality_correlation,
        JSON_OBJECT(
                'craftsdwarf_ids', (SELECT JSON_ARRAYAGG(wcd.dwarf_id)
                                    FROM workshop_craftdwarves wcd
