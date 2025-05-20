@@ -85,76 +85,168 @@ FROM military_squads AS ms;
 -- Успешность встреч с существами (отношение благоприятных исходов к неблагоприятным)
 -- Опыт, полученный участниками (сравнение навыков до и после)
 
-SELECT json_build_object(
-               'expedition_id', e.expedition_id,
-               'destination', e.destination,
-               'status', e.status,
-               'departure_date', e.departure_date,
-               'return_date', e.return_date,
-               'expedition_duration',
-               COALESCE(e.return_date, CURRENT_DATE) - e.departure_date,
-               'survival_rate',
-               ROUND(
-                       COALESCE(
-                               SUM(CASE WHEN em.survived = TRUE THEN 1 ELSE 0 END) * 100.0 /
-                               NULLIF(COUNT(em.dwarf_id), 0),
-                               0
-                       ) || '%'
-               ),
-               'artifacts_value', COALESCE(SUM(ea.value), 0),
-               'discovered_sites', COALESCE(
-                       SUM(CASE
-                               WHEN es.discovery_date BETWEEN e.departure_date AND e.return_date
-                                   THEN 1
-                               ELSE 0 END), 0
-                                   ),
-               'encounter_success_rate', ROUND(
-                       COALESCE(
-                               SUM(CASE WHEN ec.outcome = TRUE THEN 1 ELSE 0 END) * 100.0 /
-                               NULLIF(COUNT(ec.creature_id), 0),
-                               0
-                       ) || '%'
-                                         ),
-               'skill_improvement',
-               COALESCE((
-                            -- Сумма опыта после экспедиции
-                            SELECT SUM(ds_after.experience)
-                            FROM expedition_members em2
-                                     JOIN dwarf_skills ds_after ON em2.dwarf_id = ds_after.dwarf_id
-                            WHERE em2.expedition_id = e.expedition_id
-                              AND ds_after.date = (SELECT MAX(date)
-                                                   FROM dwarf_skills
-                                                   WHERE dwarf_id = ds_after.dwarf_id
-                                                     AND skill_id = ds_after.skill_id
-                                                     AND date <= COALESCE(e.return_date, CURRENT_DATE))), 0) -
-               COALESCE((
-                            -- Сумма опыта до экспедиции
-                            SELECT SUM(ds_before.experience)
-                            FROM expedition_members em2
-                                     JOIN dwarf_skills ds_before ON em2.dwarf_id = ds_before.dwarf_id
-                            WHERE em2.expedition_id = e.expedition_id
-                              AND ds_before.date = (SELECT MAX(date)
-                                                    FROM dwarf_skills
-                                                    WHERE dwarf_id = ds_before.dwarf_id
-                                                      AND skill_id = ds_before.skill_id
-                                                      AND date <= e.departure_date)), 0
-               ),
-               json_object(
-                       'member_ids', (SELECT json_arrayagg(em.dwarf_id)
-                                      FROM expedition_members AS em
-                                      WHERE em.expedition_id = e.expedition_id),
-                       'artifact_ids', (SELECT json_arrayagg(se.artifact_id)
-                                        FROM expedition_artifacts AS ea
-                                        WHERE ea.expedition_id = e.expedition_id),
-                       'operation_ids', (SELECT json_arrayagg(es.site_id)
-                                         FROM expedition_sites AS es
-                                         WHERE ea.expedition_id = e.expedition_id)
-               ) as 'related_entities'
-       )
-FROM expeditions e
-         LEFT JOIN expedition_members em ON e.expedition_id = em.expedition_id
-         LEFT JOIN expedition_artifacts ea ON ea.expedition_id = e.expedition_id
-         LEFT JOIN expedition_sites es ON es.expedition_id = e.expedition_id
-         LEFT JOIN expedition_creatures ec ON ec.expedition_id = e.expedition_id
-GROUP BY e.expedition_id
-ORDER BY e.departure_date DESC;
+WITH expedition_stats AS (SELECT e.expedition_id,
+                                 e.destination,
+                                 e.status,
+                                 COUNT(em.dwarf_id)                                        AS total_members,
+                                 SUM(CASE WHEN em.survived = TRUE THEN 1 ELSE 0 END)       AS survivors,
+                                 COALESCE(SUM(ea.value), 0)                                AS artifacts_value,
+                                 COUNT(DISTINCT es.site_id)                                AS discovered_sites,
+                                 SUM(CASE WHEN ec.outcome = 'Favorable' THEN 1 ELSE 0 END) AS favorable_encounters,
+                                 COUNT(ec.creature_id)                                     AS total_encounters,
+                                 e.departure_date,
+                                 e.return_date
+                          FROM expeditions e
+                                   LEFT JOIN
+                               expedition_members em ON e.expedition_id = em.expedition_id
+                                   LEFT JOIN
+                               expedition_artifacts ea ON e.expedition_id = ea.expedition_id
+                                   LEFT JOIN
+                               expedition_sites es ON e.expedition_id = es.expedition_id
+                                   LEFT JOIN
+                               expedition_creatures ec ON e.expedition_id = ec.expedition_id
+                          GROUP BY e.expedition_id, e.destination, e.status, e.departure_date, e.return_date),
+     skills_progression AS (SELECT em.expedition_id,
+                                   SUM(
+                                           COALESCE(ds_after.level, 0) - COALESCE(ds_before.level, 0)
+                                   ) AS total_skill_improvement
+                            FROM expedition_members em
+                                     JOIN
+                                 dwarves d ON em.dwarf_id = d.dwarf_id
+                                     JOIN
+                                 dwarf_skills ds_before ON d.dwarf_id = ds_before.dwarf_id
+                                     JOIN
+                                 dwarf_skills ds_after ON d.dwarf_id = ds_after.dwarf_id
+                                     AND ds_before.skill_id = ds_after.skill_id
+                                     JOIN
+                                 expeditions e ON em.expedition_id = e.expedition_id
+                            WHERE ds_before.date < e.departure_date
+                              AND ds_after.date > e.return_date
+                            GROUP BY em.expedition_id)
+SELECT es.expedition_id,
+       es.destination,
+       es.status,
+       es.survivors                                                  AS surviving_members,
+       es.total_members,
+       ROUND((es.survivors::DECIMAL / es.total_members) * 100, 2)    AS survival_rate,
+       es.artifacts_value,
+       es.discovered_sites,
+       COALESCE(ROUND((es.favorable_encounters::DECIMAL /
+                       NULLIF(es.total_encounters, 0)) * 100, 2), 0) AS encounter_success_rate,
+       COALESCE(sp.total_skill_improvement, 0)                       AS skill_improvement,
+       EXTRACT(DAY FROM (es.return_date - es.departure_date))        AS expedition_duration,
+       ROUND(
+               (es.survivors::DECIMAL / es.total_members) * 0.3 +
+               (es.artifacts_value / 1000) * 0.25 +
+               (es.discovered_sites * 0.15) +
+               COALESCE((es.favorable_encounters::DECIMAL /
+                         NULLIF(es.total_encounters, 0)), 0) * 0.15 +
+               COALESCE((sp.total_skill_improvement / es.total_members), 0) * 0.15,
+               2
+       )                                                             AS overall_success_score,
+       JSON_OBJECT(
+               'member_ids', (SELECT JSON_ARRAYAGG(em.dwarf_id)
+                              FROM expedition_members em
+                              WHERE em.expedition_id = es.expedition_id),
+               'artifact_ids', (SELECT JSON_ARRAYAGG(ea.artifact_id)
+                                FROM expedition_artifacts ea
+                                WHERE ea.expedition_id = es.expedition_id),
+               'site_ids', (SELECT JSON_ARRAYAGG(es2.site_id)
+                            FROM expedition_sites es2
+                            WHERE es2.expedition_id = es.expedition_id)
+       )                                                             AS related_entities
+FROM expedition_stats es
+         LEFT JOIN
+     skills_progression sp ON es.expedition_id = sp.expedition_id
+ORDER BY overall_success_score DESC;
+
+
+--Разработайте запрос, который анализирует эффективность каждой мастерской, учитывая:
+-- Производительность каждого ремесленника (соотношение созданных продуктов к затраченному времени)
+-- Эффективность использования ресурсов (соотношение потребляемых ресурсов к производимым товарам)
+-- Качество производимых товаров (средневзвешенное по ценности)
+-- Время простоя мастерской
+-- Влияние навыков ремесленников на качество товаров
+
+-- {
+--     "workshop_id": 301,
+--     "workshop_name": "Royal Forge",
+--     "workshop_type": "Smithy",
+--     "num_craftsdwarves": 4, **
+--     "total_quantity_produced": 256, **
+--     "total_production_value": 187500, **
+--
+--     "daily_production_rate": 3.41, **
+--     "value_per_material_unit": 7.82, **
+--     "workshop_utilization_percent": 85.33, **
+--
+--     "material_conversion_ratio": 1.56, **
+--
+--     "average_craftsdwarf_skill": 7.25, **
+--
+--     "skill_quality_correlation": 0.83,
+--
+--     "related_entities": {
+--       "craftsdwarf_ids": [101, 103, 108, 115],
+--       "product_ids": [801, 802, 803, 804, 805, 806],
+--       "material_ids": [201, 204, 208, 210],
+--       "project_ids": [701, 702, 703]
+--     }
+--   }
+
+WITH products_stat AS (SELECT wp.workshop_id                                                workshop_id,
+                              wp.product_id                                                 product_id,
+                              COALESCE(SUM(wp.quantity), 0)                              AS quantity_sum_per_workshop,
+                              COALESCE(SUM(p.value * wp.quantity), 0)                    AS value_sum_per_workshop,
+                              ROUND(SUM(wp.quantity) /
+                                    NULLIF(COUNT(DISTINCT DATE(wp.production_date)), 0)) AS avg_daily_production,
+                              ROUND((COUNT(DISTINCT wp.production_date)::numeric /
+                                     (CURRENT_DATE - MIN(wp.production_date) + 1)::numeric * 100,
+                                     2
+                                  ))                                                     AS working_days_percentage
+                       FROM workshop_products wp
+                                LEFT JOIN products p ON wp.product_id = p.product_id
+                       GROUP BY wp.workshop_id),
+     material_stats AS (SELECT wm.workshop_id,
+                               SUM(wm.quantity) as material_quantity
+                        FROM workshop_materials wm
+                        WHERE wm.is_input IS TRUE
+                        GROUP BY wm.workshop_id),
+     craftdwarves_stat AS (SELECT wcd.workshop_id,
+                                  AVG(ds.level) as avg_level
+                           FROM workshop_craftdwarves wcd
+                                    LEFT JOIN DWARF_SKILLS ds ON wcd.dwarf_id = ds.dwarf_id
+                           GROUP BY wcd.workshop_id)
+SELECT w.workshop_id,
+       w.name,
+       w.type,
+       w.quality,
+       COALESCE(COUNT(wcd.dward_id), 0)                                     AS num_craftsdwarves,
+       COALESCE(ps.quantity_sum_per_workshop, 0)                            AS total_quantity_produced,
+       COALESCE(ps.value_sum_per_workshop, 0)                               AS total_production_value,
+       ROUND(ps.working_days_percentage, 2)                                 AS workshop_utilization_percent,
+       ROUND(COALESCE(ps.value_sum_per_workshop::numeric
+                          / NULLIF(ms.material_quantity, 0), 0), 2)         AS value_per_material_unit,
+       ROUND(COALESCE(ms.material_quantity::numeric
+                          / NULLIF(ps.quantity_sum_per_workshop, 0), 0), 2) AS material_conversion_ratio,
+       ROUND(COALESCE(cds.avg_level, 0), 2)                                 AS average_craftsdwarf_skill,
+       JSON_OBJECT(
+               'craftsdwarf_ids', (SELECT JSON_ARRAYAGG(wcd.dwarf_id)
+                                   FROM workshop_craftdwarves wcd
+                                   WHERE wcd.workshop_id = w.workshop_id),
+               'product_ids', (SELECT JSON_ARRAYAGG(wp.product_id)
+                               FROM workshop_products wp
+                               WHERE wp.workshop_id = w.workshop_id),
+               'material_ids', (SELECT JSON_ARRAYAGG(wm.material_id)
+                                FROM workshop_materials wm
+                                WHERE wm.workshop_id = w.workshop_id),
+               'project_ids', (SELECT JSON_ARRAYAGG(p.project_id)
+                               FROM projects p
+                               WHERE p.workshop_id = w.workshop_id)
+       )                                                                    AS related_entities
+FROM workhops w
+         LEFT JOIN workshop_craftdwarves wcd ON wcd.workshop_id = w.workshop_id
+         LEFT JOIN products_stat ps ON ps.workshop_id = w.workshop_id
+         LEFT JOIN material_stats ms ON ms.workshop_id = w.workshop_id
+         LEFT JOIN craftdwarves_stat cds ON cds.workshop_id = w.workshop_id
+GROUP BY w.workhop_id, w.name, w.type, w.quality;
