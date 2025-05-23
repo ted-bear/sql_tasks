@@ -357,3 +357,82 @@ GROUP BY wa.workshop_id, wa.workshop_name, wa.workshop_type, wa.num_craftsdwarve
          me.input_quantity, me.output_quantity, me.unique_inputs, me.unique_outputs
 ORDER BY (wa.total_production_value::DECIMAL / NULLIF(wa.total_materials_consumed, 0)) *
          (wa.active_production_days::DECIMAL / NULLIF(wa.total_days, 0)) DESC;
+
+
+-- Создайте запрос, оценивающий эффективность военных отрядов на основе:
+--  - Результатов всех сражений (победы/поражения/потери)
+--  - Соотношения побед к общему числу сражений
+--  - Навыков членов отряда и их прогресса
+--  - Качества экипировки
+--  - Истории тренировок и их влияния на результаты
+--  - Выживаемости членов отряда в долгосрочной перспективе
+
+WITH squad_stats AS (SELECT ms.squad_id,
+                            ms.name                                                    squad_name,
+                            ms.formation_type,
+                            d.name                                                     leader_name,
+                            COUNT(sb.report_id)                                        total_battles,
+                            SUM(CASE WHEN sb.outcome = 'victory' THEN 1 ELSE 0 END)    victories_count,
+                            SUM(CASE WHEN sb.outcome = 'defeat' THEN 1 ELSE 0 END)     defeats_count,
+                            COUNT(sm.dward_id)                                         total_members,
+                            COUNT(CASE WHEN sm.exit_date IS NULL THEN sm.dward_id END) active_members,
+                            COUNT(CASE
+                                      WHEN sm.exit_date IS NOT NULL AND sm.exit_reason = 'death'
+                                          THEN sm.dwarf_id END)                        death_toll,
+                            SUM(sb.casualities)                                        total_casualities,
+                            SUM(sb.enemy_casualitites)                                 total_enemy_casualities
+                     FROM military_squad ms
+                              LEFT JOIN dwarves d ON d.dwarf_id = ms.leader_id
+                              LEFT JOIN squad_battles sb ON sb.squad_id = ms.squad_id
+                              LEFT JOIN squad_members sm ON sm.squad_id = ms.squad_id
+                     GROUP BY ms.squad_id, ms.name, ms.formation_type, d.name),
+     equipment_stats AS (SELECT sq.equipment_id,
+                                sq.squad_id,
+                                eq.quality
+                         FROM squad_equipment sq
+                                  LEFT JOIN equipment eq ON sq.equipment_id = eq.equipment_id),
+     battle_members AS (SELECT sb.report_id, sb.squad_id, sm.dwarf_id
+                        FROM squad_battler sb
+                                 LEFT JOIN squad_members sm ON sm.squad_id = sb.squad_id
+                        WHERE (sm.exit_date IS NULL AND sm.join_date >= sb.date)
+                           OR sm.exit_date >= sb.date),
+     combat_skill_progression AS (SELECT sb.squad_id,
+                                         SUM(
+                                                 COALESCE(ds_after.level, 0) - COALESCE(ds_before.level, 0)
+                                         ) AS total_skill_improvement
+                                  FROM squad_battles sb
+                                           JOIN
+                                       battle_members bm ON bm.squad_id = sb.squad_id
+                                           JOIN
+                                       dwarves d ON bm.dwarf_id = d.dwarf_id
+                                           JOIN
+                                       dwarf_skills ds_before ON d.dwarf_id = ds_before.dwarf_id
+                                           JOIN
+                                       dwarf_skills ds_after ON d.dwarf_id = ds_after.dwarf_id
+                                           AND ds_before.skill_id = ds_after.skill_id
+                                  WHERE ds_before.date < sb.date
+                                    AND ds_after.date >= sb.return_date
+                                  GROUP BY sb.report_id)
+SELECT ss.squad_id,
+       ss.squad_name,
+       ss.formation_type,
+       ss.leader_name,
+       ss.total_battles,
+       ss.victories_count                                                               victories,
+       ROUND(COALESCE(ss.victories_count::numeric / NULLIF(ss.total_battles, 0), 0), 2) victory_percentage,
+       ROUND(COALESCE(ss.total_casualities::numeric / NULLIF(ss.total_members), 0), 2)  casualty_rate,
+       ROUND(COALESCE(ss.total_casualities::numeric / NULLIF(ss.total_enemy_casualities), 0),
+             2)                                                                         casualty_exchange_ratio,
+       COALESCE(ss.active_members, 0)                                                   current_members,
+       COALESCE(ss.total_members, 0)                                                    total_members_ever,
+       ROUND(COALESCE(ss.active_members::numeric / NULLIF(ss.total_members), 0), 2)     retention_rate,
+       COALESCE(AVG(es.quality), 0)                                                     avg_equipment_quality,
+       COALESCE(AVG(st.effectiveness), 0)                                               avg_training_effectivness,
+       CORR(COALESCE(ss.victories_count::numeric / NULLIF(ss.total_battles, 0), 0),
+            st.effectiveness)                                                           training_battle_correletaion,
+       COALESCE(AVG(csp.total_skill_improvement), 0)                                    avg_total_skill_improvement
+FROM squad_stats ss
+         LEFT JOIN equipment_stats es ON es.squad_id = ss.squad_id
+         LEFT JOIN squad_training st ON st.squad_id = ss.squad_id
+         LEFT JOIN combat_skill_progression csp ON csp.squad_id = ss.squad_id
+GROUP BY ss.squad_id, ss.squad_name, ss.formation_type
