@@ -579,3 +579,109 @@ GROUP BY s.squad_id, s.name, s.formation_type, d.name,
          ste.total_training_sessions, ste.total_training_hours,
          ste.avg_training_effectiveness, ste.training_battle_correlation
 ORDER BY overall_effectiveness_score DESC;
+
+
+-- Разработайте запрос, анализирующий торговые отношения со всеми цивилизациями, оценивая:
+-- - Баланс торговли с каждой цивилизацией за все время
+-- - Влияние товаров каждого типа на экономику крепости
+-- - Корреляцию между торговлей и дипломатическими отношениями
+-- - Эволюцию торговых отношений во времени
+-- - Зависимость крепости от определенных импортируемых товаров
+-- - Эффективность экспорта продукции мастерских
+
+-- {
+--   "total_trading_partners": 5,
+--   "all_time_trade_value": 15850000,
+--   "all_time_trade_balance": 1250000,
+--   "civilization_data": {
+--     "civilization_trade_data": [
+--       {
+--         "civilization_type": "Human",
+--         "total_caravans": 42,
+--         "total_trade_value": 5240000, just sum
+--         "trade_balance": 840000, from caravan is plus, else -- minus
+--         "trade_relationship": "Favorable", max(date) and r_c
+--         "diplomatic_correlation": 0.78,
+--         "caravan_ids": [1301, 1305, 1308, 1312, 1315]
+--       },
+--       {
+--         "civilization_type": "Elven",
+--         "total_caravans": 38,
+--         "total_trade_value": 4620000,
+--         "trade_balance": -280000,
+--         "trade_relationship": "Unfavorable",
+--         "diplomatic_correlation": 0.42,
+--         "caravan_ids": [1302, 1306, 1309, 1316, 1322]
+--       }
+--     ]
+--   },
+--   "critical_import_dependencies": {
+--     "resource_dependency": [
+--       {
+--         "material_type": "Exotic Metals",
+--         "dependency_score": 2850.5,
+--         "total_imported": 5230,
+--         "import_diversity": 4,
+--         "resource_ids": [202, 208, 215]
+--       },
+--       {
+--         "material_type": "Lumber",
+--         "dependency_score": 1720.3,
+--         "total_imported": 12450,
+--         "import_diversity": 3,
+--         "resource_ids": [203, 209, 216]
+--       }
+--     ]
+--   },
+--   "export_effectiveness": {
+--     "export_effectiveness": [
+--       {
+--         "workshop_type": "Smithy",
+--         "product_type": "Weapons",
+--         "export_ratio": 78.5,
+--         "avg_markup": 1.85,
+--         "workshop_ids": [301, 305, 310]
+--       },
+--       {
+--         "workshop_type": "Jewelery",
+--         "product_type": "Ornaments",
+--         "export_ratio": 92.3,
+--         "avg_markup": 2.15,
+--         "workshop_ids": [304, 309, 315]
+--       }
+--     ]
+--   },
+--   "trade_timeline": {
+--     "trade_growth": [
+--       {
+--         "year": 205,
+--         "quarter": 1,
+--         "quarterly_value": 380000,
+--         "quarterly_balance": 20000,
+--         "trade_diversity": 3
+--       },
+--       {
+--         "year": 205,
+--         "quarter": 2,
+--         "quarterly_value": 420000,
+--         "quarterly_balance": 35000,
+--         "trade_diversity": 4
+--       }
+--     ]
+--   }
+-- }
+
+WITH civilization_trade_stats AS (SELECT c.civilization_type,
+                                         c.caravan_id,
+                                         COALESCE(SUM(tt.value), 0)                   total_trade_value,
+                                         COALESCE(SUM(CASE
+                                                          WHEN tt.balance_direction = 'sell' THEN tt.value
+                                                          ELSE -1 * tt.value END), 0) total_trade_balance
+                                  FROM caravans c
+                                           LEFT JOIN trade_transactions tt ON c.caravan_id = tt.caravan_id
+                                  GROUP BY c.civilization_type, c.caravan_id),
+     civilization_diplomatic_stats AS (SELECT de.caravan_id,
+                                              de.civilization_type
+                                       FROM diplomatic_events de)
+SELECT *
+FROM caravans c;
