@@ -451,11 +451,11 @@ WITH squad_battle_stats AS (SELECT sb.squad_id,
                             FROM squad_battles sb
                             GROUP BY sb.squad_id),
      squad_member_history AS (SELECT sm.squad_id,
-                                     COUNT(DISTINCT sm.dwarf_id)                                                  AS total_members_ever,
-                                     COUNT(DISTINCT CASE WHEN sm.exit_reason IS NULL THEN sm.dwarf_id END)        AS current_members,
-                                     COUNT(DISTINCT CASE WHEN sm.exit_reason = 'Death' THEN sm.dwarf_id END)      AS deaths,
+                                     COUNT(DISTINCT sm.dwarf_id)                                             AS total_members_ever,
+                                     COUNT(DISTINCT CASE WHEN sm.exit_reason IS NULL THEN sm.dwarf_id END)   AS current_members,
+                                     COUNT(DISTINCT CASE WHEN sm.exit_reason = 'Death' THEN sm.dwarf_id END) AS deaths,
                                      AVG(EXTRACT(DAY FROM
-                                                 (COALESCE(sm.exit_date, CURRENT_DATE) - sm.join_date)))          AS avg_service_days
+                                                 (COALESCE(sm.exit_date, CURRENT_DATE) - sm.join_date)))     AS avg_service_days
                               FROM squad_members sm
                               GROUP BY sm.squad_id),
      squad_skill_progression AS (SELECT sm.squad_id,
@@ -988,3 +988,161 @@ SELECT
                                            FROM workshops) w)
     )                                                                              AS trade_recommendations
 FROM (SELECT 1) AS dummy;
+
+-- Разработайте запрос, который комплексно анализирует безопасность крепости, учитывая:
+-- - Историю всех атак существ и их исходов
+-- - Эффективность защитных сооружений
+-- - Соотношение между типами существ и результативностью обороны
+-- - Оценку уязвимых зон на основе архитектуры крепости
+-- - Корреляцию между сезонными факторами и частотой нападений
+-- - Готовность военных отрядов и их расположение
+-- - Эволюцию защитных способностей крепости со временем
+--
+-- Возможный вариант выдачи:
+
+-- {
+--   "total_recorded_attacks": 183,
+--   "unique_attackers": 42,
+--   "overall_defense_success_rate": 76.50,
+--   "security_analysis": {
+--     "threat_assessment": {
+--       "current_threat_level": "Moderate",
+--       "active_threats": [
+--         {
+--           "creature_type": "Goblin", *
+--           "threat_level": 3, *
+--           "last_sighting_date": "0205-08-12", *
+--           "territory_proximity": 1.2, *
+--           "estimated_numbers": 35, *
+--           "creature_ids": [124, 126, 128, 132, 136] *
+--         },
+--         {
+--           "creature_type": "Forgotten Beast",
+--           "threat_level": 5,
+--           "last_sighting_date": "0205-07-28",
+--           "territory_proximity": 3.5,
+--           "estimated_numbers": 1,
+--           "creature_ids": [158]
+--         }
+--       ]
+--     },
+--     "vulnerability_analysis": [
+--       {
+--         "zone_id": 15, *
+--         "zone_name": "Eastern Gate", *
+--         "vulnerability_score": 0.68, * == crea_att.cas / ca.enemy_cas
+--         "historical_breaches": 8, * == COUNT(DISTINCT attack_id)
+--         "fortification_level": 2, * == l.fort_lev
+--         "military_response_time": 48, * == AVG(creat_att.mil_res_time)
+--         "defense_coverage": {
+--           "structure_ids": [182, 183, 184], * == json_object(json_arrayarg(def_str_used))
+--           "squad_ids": [401, 405] * == SQUAD_TRAINING.loc_id == l.loc_id
+--         }
+--       }
+--     ],
+--     "defense_effectiveness": [
+--       {
+--         "defense_type": "Drawbridge", * == l.zone_type
+--         "effectiveness_rate": 95.12, * ==
+--         "avg_enemy_casualties": 12.4, * == avg(ca.enemy_cas)
+--         "structure_ids": [185, 186, 187, 188] *
+--       },
+--       {
+--         "defense_type": "Trap Corridor",
+--         "effectiveness_rate": 88.75,
+--         "avg_enemy_casualties": 8.2,
+--         "structure_ids": [201, 202, 203, 204]
+--       }
+--     ],
+--     "military_readiness_assessment": [
+--       {
+--         "squad_id": 403,
+--         "squad_name": "Crossbow Legends",
+--         "readiness_score": 0.92,
+--         "active_members": 7,
+--         "avg_combat_skill": 8.6,
+--         "combat_effectiveness": 0.85,
+--         "response_coverage": [
+--           {
+--             "zone_id": 12,
+--             "response_time": 0
+--           },
+--           {
+--             "zone_id": 15,
+--             "response_time": 36
+--           }
+--         ]
+--       }
+--     ],
+--     "security_evolution": [
+--       {
+--         "year": 203,
+--         "defense_success_rate": 68.42,
+--         "total_attacks": 38,
+--         "casualties": 42,
+--         "year_over_year_improvement": 3.20
+--       },
+--       {
+--         "year": 204,
+--         "defense_success_rate": 72.50,
+--         "total_attacks": 40,
+--         "casualties": 36,
+--         "year_over_year_improvement": 4.08
+--       }
+--     ]
+--   }
+-- }
+
+WITH active_threats_stats AS (SELECT c.type,
+                                     c.threat_level,
+                                     cs.date                   last_sighting_date,
+                                     COALESCE(SUM(ct.area), 0) creature_area,
+                                     c.estimated_population    population,
+                                     json_object(
+                                             'creatures_ids', (SELECT json_arrayagg(cc.creature_id)
+                                                               FROM creatures cc
+                                                               WHERE cc.creature_id = c.creature_id)
+                                     )
+                              FROM creatures as c
+                                       LEFT JOIN creature_sightings cs ON c.creature_id = cs.creature_id
+                                  AND cs.date = (SELECT MAX(cs.date)
+                                                 FROM creature_sightings
+                                                 WHERE creature_id = c.creature_id)
+                                       LEFT JOIN creature_territories ct ON ct.creature_id = c.creature_id
+                              GROUP BY c.type, c.threat_level, c.estimated_population),
+     vulnerability_stats AS (SELECT l.zone_id,
+                                    l.name                                        zone_name,
+                                    COALESCE(SUM(ca.casualities), 0)              total_casualties,
+                                    COALESCE(SUM(ca.enemy_casualities), 0)        total_enemy_casualties,
+                                    ROUND(AVG(ca.military_response_time_minutes)) avg_military_response_type
+                             FROM locations l
+                                      LEFT JOIN creature_attacks ca ON ca.location_id = l.location_id
+                             GROUP BY l.zone_id, l.name, l.fortification_level),
+     defense_effectivness_stats AS (SELECT l.zone_type,
+                                           ROUND(
+                                                   COALESCE(
+                                                           SUM(ca.enemy_casualities)::numeric
+                                                               / NULLIF(ca.casualities) * 100,
+                                                           0), 2)    effectivness,
+                                           AVG(ca.enemy_casualities) avg_enemy_cas
+                                    FROM locations l
+                                             LEFT JOIN creature_attacks ca ON ca.location_id = l.location_id
+                                    GROUP BY l.zony_type),
+     combat_skills AS (SELECT ds.dwarf_id, ds.skill_id, ds.level, ds.experience, ds.date
+                       FROM dwarf_skills ds
+                                LEFT JOIN skills s ON s.skill_id = ds.skill_id
+                       WHERE s.category = 'combat'
+                         AND ds.date = (SELECT MAX(date)
+                                        FROM dwarf_skills
+                                        GROUP BY dwarf_skills.dwarf_id, dwarf_skills.skill_id)),
+     squad_stats AS (SELECT ms.squad_id,
+                            ms.name,
+                            SUM(CASE WHEN sm.exit_date IS NULL THEN 1 ELSE 0 END) active_members,
+                            AVG(cs.experience)                                    avg_combat_skills
+                     FROM military_squad ms
+                              LEFT JOIN squad_members sm ON sm.squad_id = ms.squad_id
+                              LEFT JOIN combat_skills cs ON cs.dwarf_id = sm.dwarf_id)
+SELECT COALESCE(COUNT(DISTINCT ca.attack_id), 0)   total_recorded_attacks,
+       COALESCE(COUNT(DISTINCT ca.creature_id), 0) unique_attackers
+
+FROM creature_attacks ca
